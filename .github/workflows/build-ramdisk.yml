@@ -367,16 +367,39 @@ jobs:
           }
           echo "$OUT"
 
+          # Coprocessor firmware check: read the BuildManifest itself (same identity
+          # selection and key names as build.sh) instead of scraping build.sh's
+          # pretty-printed output, which produced a false "missing" result.
           if [[ "$INPUT_WITH_FW" == "true" ]]; then
-            missing=""
-            for key in AOP ANE AVE ISP GFX SIO; do
-              grep -qE "^ ${key}: " <<< "$OUT" || missing="$missing $key"
-            done
-            if [[ -n "$missing" ]]; then
-              echo "::error::BuildManifest for $DEV_NAME / $RESOLVED_BUILD is missing:$missing (required by with_fw). Re-run with with_fw=false or another build." >&2
-              exit 1
+            MANIFEST_FILE="$(find "$PWD" /tmp -name BuildManifest.plist \
+              -path "*${DEV_PRODUCT}-${RESOLVED_BUILD}*" 2>/dev/null | head -1)"
+            [[ -n "$MANIFEST_FILE" ]] || MANIFEST_FILE="$(ls /tmp/bm_debug/BuildManifest.plist 2>/dev/null || true)"
+            if [[ -z "$MANIFEST_FILE" ]]; then
+              echo "::warning::BuildManifest.plist not found for the firmware check; build.sh will enforce it during the build"
+            else
+              echo "Checking firmware keys in $MANIFEST_FILE"
+              python3 - "$MANIFEST_FILE" << 'PY'
+          import os, plistlib, sys
+          board = os.environ["DEV_MODEL"].lower()
+          manifest = plistlib.load(open(sys.argv[1], "rb"))
+          identity = next((i for i in manifest["BuildIdentities"]
+                           if i.get("Info", {}).get("DeviceClass", "").lower() == board), None)
+          if identity is None:
+              print(f"::error::No BuildIdentity for board {board} in manifest")
+              sys.exit(1)
+          images = identity["Manifest"]
+          missing = []
+          for key in ("AOP", "ANE", "AVE", "ISP", "GFX", "SIO"):
+              path = images.get(key, {}).get("Info", {}).get("Path")
+              print(f"  {key}: {path or 'MISSING'}")
+              if not path:
+                  missing.append(key)
+          if missing:
+              print(f"::error::BuildManifest for {os.environ['DEV_NAME']} / {os.environ['RESOLVED_BUILD']} is missing: {' '.join(missing)} (required by with_fw). Re-run with with_fw=false or another build.")
+              sys.exit(1)
+          print("OK: all coprocessor firmware present (AOP ANE AVE ISP GFX SIO)")
+          PY
             fi
-            echo "OK: all coprocessor firmware present (AOP ANE AVE ISP GFX SIO)"
           fi
 
       - name: Build bootchain
@@ -490,3 +513,4 @@ jobs:
             mv -f env.sh.bak env.sh
             echo "Restored original env.sh"
           fi
+          
