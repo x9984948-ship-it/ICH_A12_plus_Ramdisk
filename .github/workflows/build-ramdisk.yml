@@ -140,14 +140,56 @@ jobs:
           echo "=== PATH ==="
           tr ':' '\n' <<< "$PATH"
 
+      - name: Setup Python 3.12
+        # Python comes from actions/setup-python instead of Homebrew. `brew install
+        # python@3` was upgrading python@3.14 together with openssl@3, and the openssl@3
+        # `brew link` step failed on a stale /opt/homebrew/bin/openssl symlink that
+        # belongs to openssl@1.1 on the runner image, which aborted the whole job.
+        # Version is pinned so pip wheels for pyimg4 / capstone resolve predictably.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install system dependencies
+        # Only `ipsw` is installed from Homebrew. curl ships with macOS, python3 comes
+        # from setup-python above. HOMEBREW_NO_INSTALL_UPGRADE stops brew from upgrading
+        # already-installed (outdated) formulae and their dependencies, which is what
+        # triggered the openssl@3 link failure.
+        env:
+          HOMEBREW_NO_INSTALL_UPGRADE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
         run: |
           set -e
-          brew update
-          brew install ipsw curl python@3
+          # Fallback only: free the symlink that blocks openssl@3 on some runner images.
+          if brew list --versions openssl@1.1 >/dev/null 2>&1; then
+            brew unlink openssl@1.1 || true
+          fi
+
+          install_ipsw() {
+            brew install ipsw && return 0
+            # Formula may be poured but not linked; force the link before giving up.
+            brew link --overwrite ipsw 2>/dev/null && command -v ipsw >/dev/null
+          }
+
+          if ! command -v ipsw >/dev/null; then
+            ok=0
+            for attempt in 1 2 3; do
+              echo "=== brew install ipsw (attempt $attempt/3) ==="
+              if install_ipsw; then ok=1; break; fi
+              sleep $((attempt * 10))
+              brew update || true
+            done
+            [[ "$ok" == "1" ]] || { echo "::error::Could not install ipsw via Homebrew" >&2; exit 1; }
+          fi
+
           which ipsw || { echo "FAIL: ipsw not installed" >&2; exit 1; }
           which python3 || { echo "FAIL: python3 not installed" >&2; exit 1; }
+          which curl || { echo "FAIL: curl not found" >&2; exit 1; }
           echo "OK: ipsw $(ipsw version 2>/dev/null | head -1)"
+          echo "OK: $(python3 --version) at $(which python3)"
 
       - name: Setup Python venv
         run: |
